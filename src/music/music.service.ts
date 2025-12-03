@@ -3,7 +3,7 @@ import { HttpService } from '@nestjs/axios';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { firstValueFrom } from 'rxjs';
-import * as FormData from 'form-data';
+import FormData from 'form-data';
 import { Music } from './music.entity';
 
 @Injectable()
@@ -98,10 +98,10 @@ export class MusicService {
         // 100x100 저화질을 600x600 고화질로 변환
         return response.data.results[0].artworkUrl100.replace('100x100', '600x600');
       }
-      return null; // 검색 결과 없음
+      return ''; // 검색 결과 없음
     } catch (e) {
       console.error('iTunes API Error:', e.message);
-      return null;
+      return ''; // 검색 결과 없음
     }
   }
 

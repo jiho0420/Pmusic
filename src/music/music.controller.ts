@@ -1,7 +1,7 @@
 import { Controller, Post, UploadedFile, UseInterceptors, Body, Res, HttpException, HttpStatus } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { MusicService } from './music.service';
-import * as express from 'express';;
+import * as express from 'express';
 
 @Controller('music')
 export class MusicController {
