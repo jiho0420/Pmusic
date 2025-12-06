@@ -9,5 +9,6 @@ import { HistoryController } from './history.controller';
   imports: [TypeOrmModule.forFeature([History, User])],
   providers: [HistoryService],
   controllers: [HistoryController],
+  exports: [HistoryService],              // 다른 모듈에서 HistoryService 사용 가능
 })
 export class HistoryModule {}

@@ -1,10 +1,12 @@
-import { Injectable, HttpException, HttpStatus } from '@nestjs/common';
+import { Injectable, HttpException, HttpStatus, Inject, forwardRef } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { firstValueFrom } from 'rxjs';
 import FormData from 'form-data';
+import { createReadStream } from 'fs';
 import { Music } from './music.entity';
+import { HistoryService } from '../history/history.service';
 
 @Injectable()
 export class MusicService {
@@ -12,6 +14,8 @@ export class MusicService {
     private readonly httpService: HttpService,
     @InjectRepository(Music)
     private readonly musicRepository: Repository<Music>,
+    @Inject(forwardRef(() => HistoryService))
+    private readonly historyService: HistoryService,
   ) {}
 
   // 사설 클라우드 AI 서버 주소 (환경변수 또는 하드코딩)
@@ -20,7 +24,11 @@ export class MusicService {
   // --- [기능 1] 음원 분리 (AI 서버 연동) ---
   async separateMusic(file: Express.Multer.File): Promise<Buffer> {
     const formData = new FormData();
-    formData.append('file', file.buffer, file.originalname);
+    // file.path가 있으면 디스크 파일, 없으면 메모리 버퍼 사용
+    const fileStream = file.path 
+      ? createReadStream(file.path)
+      : file.buffer;
+    formData.append('file', fileStream, file.originalname);
     formData.append('model', 'htdemucs'); 
 
     try {
@@ -41,7 +49,11 @@ export class MusicService {
   // --- [기능 2] 벡터 추출 (AI 서버 연동 + 안전장치) ---
   async extractVector(file: Express.Multer.File): Promise<number[]> {
     const formData = new FormData();
-    formData.append('file', file.buffer, file.originalname);
+    // file.path가 있으면 디스크 파일, 없으면 메모리 버퍼 사용
+    const fileStream = file.path 
+      ? createReadStream(file.path)
+      : file.buffer;
+    formData.append('file', fileStream, file.originalname);
 
     try {
       // AI 서버의 /embedding API 호출
@@ -116,5 +128,18 @@ export class MusicService {
   // [보조] 음악 데이터 등록
   async registerMusic(data: Partial<Music>) {
     return this.musicRepository.save(data);
+  }
+
+  // [보조] 추천 히스토리 자동 저장
+  async saveRecommendationHistory(params: {
+    userId: number;
+    filePath: string;
+    recommendedMusic: any[];
+  }) {
+    return this.historyService.createHistory({
+      userId: params.userId,
+      userUploadedAudio: params.filePath,
+      recommendedMusic: params.recommendedMusic,
+    });
   }
 }
