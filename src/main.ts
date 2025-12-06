@@ -1,8 +1,22 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
+import { NestExpressApplication } from '@nestjs/platform-express';
+import { join } from 'path';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+
+  // CORS 설정 (프론트엔드와 연동을 위해)
+  app.enableCors({
+    origin: process.env.FRONTEND_URL || 'http://localhost:5173', // Vite 기본 포트
+    credentials: true,
+  });
+
+  // 정적 파일 서빙 설정 (분리된 음원 파일 접근을 위해)
+  const uploadPath = process.env.UPLOAD_PATH || './uploads';
+  app.useStaticAssets(join(process.cwd(), uploadPath, 'separated'), {
+    prefix: '/music/separated/',
+  });
 
   const port = process.env.PORT ? Number(process.env.PORT) : 65041;
   await app.listen(port);
