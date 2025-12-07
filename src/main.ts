@@ -12,7 +12,8 @@ async function bootstrap() {
     credentials: true,
   });
 
-  // 정적 파일 서빙 설정 (분리된 음원 파일 접근을 위해)
+  // 정적 파일 서빙 설정 (분리된 음원 파일만 서빙)
+  // 원본 업로드 파일은 AI 처리 후 삭제되므로 서빙 불필요
   const uploadPath = process.env.UPLOAD_PATH || './uploads';
   app.useStaticAssets(join(process.cwd(), uploadPath, 'separated'), {
     prefix: '/music/separated/',

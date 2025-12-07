@@ -27,7 +27,8 @@ export class History {
   @CreateDateColumn()
   date: Date;
 
-  // [유저가 첨부한 음원] 파일 경로 또는 URL 저장
+  // [유저가 첨부한 음원 정보] 원본 파일명 + 악기 정보 (예: "song.mp3 (drums)")
+  // 파일 자체는 저장하지 않음 (디스크 공간 절약)
   @Column()
   userUploadedAudio: string;
 

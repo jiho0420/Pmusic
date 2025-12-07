@@ -1,10 +1,10 @@
-import { Injectable, HttpException, HttpStatus, Inject, forwardRef } from '@nestjs/common';
+import { Injectable, HttpException, HttpStatus, Inject, forwardRef, BadRequestException } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { firstValueFrom } from 'rxjs';
 import FormData from 'form-data';
-import { createReadStream, writeFileSync, mkdirSync, existsSync } from 'fs';
+import { createReadStream, writeFileSync, mkdirSync, existsSync, unlinkSync } from 'fs';
 import { join, extname } from 'path';
 import AdmZip from 'adm-zip';
 import { Music } from './music.entity';
@@ -23,18 +23,25 @@ export class MusicService {
   // 사설 클라우드 AI 서버 주소 (환경변수 또는 하드코딩)
   // 기본값은 AI 서버 README에 따르면 포트 8080 사용
   private readonly AI_SERVER_URL = process.env.AI_SERVER_URL || 'http://localhost:8080';
+  private readonly BASE_URL = process.env.BASE_URL || 'http://localhost:65041';
+
+  // iTunes API 캐싱 (메모리 캐시, TTL: 1시간)
+  private readonly albumCoverCache = new Map<string, { url: string; expiry: number }>();
+  private readonly CACHE_TTL = 60 * 60 * 1000; // 1시간
 
   // --- [기능 1] 음원 분리 (AI 서버 연동) ---
   // ZIP 파일을 받아서 풀고, 개별 파트 파일 정보 반환 (프론트엔드에서 직접 재생 가능하도록)
+  // 원본 파일은 처리 후 삭제하여 디스크 공간 절약
   async separateMusic(file: Express.Multer.File): Promise<{
     files: Array<{ name: string; url: string; type: string }>;
   }> {
+    // 파일 유효성 검사
+    if (!file || !file.path) {
+      throw new BadRequestException('유효한 파일이 필요합니다.');
+    }
+
     const formData = new FormData();
-    // file.path가 있으면 디스크 파일, 없으면 메모리 버퍼 사용
-    const fileStream = file.path 
-      ? createReadStream(file.path)
-      : file.buffer;
-    formData.append('file', fileStream, file.originalname);
+    formData.append('file', createReadStream(file.path), file.originalname);
     formData.append('model', 'htdemucs'); 
 
     try {
@@ -59,7 +66,6 @@ export class MusicService {
       // ZIP 파일 내의 각 파일 추출
       const zipEntries = zip.getEntries();
       const fileInfos: Array<{ name: string; url: string; type: string }> = [];
-      const baseUrl = process.env.BASE_URL || 'http://localhost:65041';
 
       for (const entry of zipEntries) {
         if (!entry.isDirectory) {
@@ -68,17 +74,8 @@ export class MusicService {
           const fileExt = extname(fileName);
           const baseName = fileName.replace(fileExt, '');
           
-          // 파트 타입 추출 (일반적인 패턴: "song_drums", "song_vocals" 등)
-          let partType = 'other';
-          if (baseName.includes('drums') || baseName.includes('drum')) {
-            partType = 'drums';
-          } else if (baseName.includes('vocals') || baseName.includes('vocal')) {
-            partType = 'vocals';
-          } else if (baseName.includes('bass')) {
-            partType = 'bass';
-          } else if (baseName.includes('other')) {
-            partType = 'other';
-          }
+          // 파트 타입 추출
+          const partType = this.extractPartType(baseName);
 
           // 파일 저장
           const fileBuffer = entry.getData();
@@ -89,7 +86,7 @@ export class MusicService {
           writeFileSync(savedPath, fileBuffer);
 
           // 접근 가능한 URL 생성
-          const fileUrl = `${baseUrl}/music/separated/${savedFileName}`;
+          const fileUrl = `${this.BASE_URL}/music/separated/${savedFileName}`;
           
           fileInfos.push({
             name: fileName,
@@ -103,30 +100,46 @@ export class MusicService {
     } catch (error) {
       console.error('AI Separation Failed:', error.message);
       throw new HttpException('AI 서버 음원 분리 실패', HttpStatus.BAD_GATEWAY);
+    } finally {
+      // 원본 파일 삭제 (디스크 공간 절약)
+      this.deleteFileIfExists(file.path);
     }
+  }
+
+  // [보조] 파일명에서 파트 타입 추출
+  private extractPartType(baseName: string): string {
+    const lowerName = baseName.toLowerCase();
+    if (lowerName.includes('drums') || lowerName.includes('drum')) return 'drums';
+    if (lowerName.includes('vocals') || lowerName.includes('vocal')) return 'vocals';
+    if (lowerName.includes('bass')) return 'bass';
+    if (lowerName.includes('piano')) return 'piano';
+    if (lowerName.includes('guitar')) return 'guitar';
+    return 'other';
   }
 
   // --- [기능 2] AI 서버로부터 유사한 음악 추천 받기 ---
   // AI 서버에 오디오 파일, 악기 이름, 시작/종료 시간을 전송하여 추천 받음
+  // 원본 파일은 처리 후 삭제하여 디스크 공간 절약
   async getRecommendationsFromAI(params: {
     file: Express.Multer.File;
     instrument: string;
     startSec: number;
     endSec: number;
-  }): Promise<any> {
+  }): Promise<any[]> {
+    // 파일 유효성 검사
+    if (!params.file || !params.file.path) {
+      throw new BadRequestException('유효한 파일이 필요합니다.');
+    }
+
     const formData = new FormData();
-    // file.path가 있으면 디스크 파일, 없으면 메모리 버퍼 사용
-    const fileStream = params.file.path 
-      ? createReadStream(params.file.path)
-      : params.file.buffer;
-    formData.append('file', fileStream, params.file.originalname);
+    formData.append('file', createReadStream(params.file.path), params.file.originalname);
     formData.append('instrument', params.instrument);
     formData.append('start_sec', params.startSec.toString());
     formData.append('end_sec', params.endSec.toString());
 
     try {
-      // AI 서버의 추천 API 호출 (엔드포인트는 AI 서버 코드에 따라 조정 필요)
-      // README에 따르면 입력: 오디오 파일, 악기 이름, 시작 시간, 종료 시간
+      // AI 서버의 추천 API 호출
+      // 입력: 오디오 파일, 악기 이름, 시작 시간, 종료 시간
       // 출력: 유사한 음악 리스트 top_k = 5
       const response = await firstValueFrom(
         this.httpService.post(`${this.AI_SERVER_URL}/recommend`, formData, {
@@ -147,10 +160,14 @@ export class MusicService {
         `AI 서버 추천 실패: ${error.message}`,
         HttpStatus.BAD_GATEWAY,
       );
+    } finally {
+      // 원본 파일 삭제 (디스크 공간 절약)
+      this.deleteFileIfExists(params.file.path);
     }
   }
 
   // --- [기능 3] AI 서버 추천 결과를 DB Music 정보와 결합 ---
+  // AI 서버는 similarity를 직접 반환 (코사인 유사도, 0~1)
   async enrichRecommendationsWithMusicInfo(aiResults: any[]): Promise<any[]> {
     const enrichedResults: any[] = [];
 
@@ -158,7 +175,9 @@ export class MusicService {
       // AI 서버가 반환한 song_name으로 DB에서 음악 정보 조회
       // song_name 형식이 "제목 - 아티스트" 또는 "제목"일 수 있음
       const songName = result.song_name || '';
-      const [title, artist] = songName.split(' - ').map(s => s.trim());
+      const [title, artist] = songName.split(' - ').map((s: string) => s.trim());
+
+      const similarity = result.similarity ?? (result.distance ? 1 - result.distance : 0);
 
       let musicInfo: Music | null = null;
       if (title) {
@@ -175,38 +194,33 @@ export class MusicService {
         }
       }
 
-      // DB에 없는 경우 iTunes API로 정보 가져오기
+      // 공통 기본 정보
+      const baseResult = {
+        id: result.id,
+        similarity, // AI 서버에서 직접 받은 유사도 사용
+        songName: result.song_name,
+        instrument: result.instrument,
+        startSec: result.start_sec,
+        endSec: result.end_sec,
+      };
+
+      // DB에 없는 경우 iTunes API로 정보 가져오기 (캐싱 적용)
       if (!musicInfo && title) {
-        const albumCoverUrl = await this.fetchAlbumCoverFromItunes(
-          title,
-          artist || '',
-        );
+        const albumCoverUrl = await this.fetchAlbumCoverFromItunes(title, artist || '');
         
         enrichedResults.push({
-          id: result.id,
-          distance: result.distance,
-          similarity: 1 - result.distance, // distance를 similarity로 변환 (작을수록 유사)
-          songName: result.song_name,
-          title: title,
+          ...baseResult,
+          title,
           artist: artist || 'Unknown',
-          instrument: result.instrument,
-          startSec: result.start_sec,
-          endSec: result.end_sec,
-          albumCoverUrl: albumCoverUrl,
-          youtubeVideoId: null, // AI 서버에서 제공하지 않음
+          albumCoverUrl,
+          youtubeVideoId: null,
         });
       } else if (musicInfo) {
         // DB에 있는 경우 기존 정보 사용
         enrichedResults.push({
-          id: result.id,
-          distance: result.distance,
-          similarity: 1 - result.distance,
-          songName: result.song_name,
+          ...baseResult,
           title: musicInfo.title,
           artist: musicInfo.artist,
-          instrument: result.instrument,
-          startSec: result.start_sec,
-          endSec: result.end_sec,
           albumCoverUrl: musicInfo.albumCoverUrl || '',
           youtubeVideoId: musicInfo.youtubeVideoId,
           youtubeStartTime: musicInfo.youtubeStartTime,
@@ -214,15 +228,9 @@ export class MusicService {
       } else {
         // 정보를 찾을 수 없는 경우 기본 정보만 반환
         enrichedResults.push({
-          id: result.id,
-          distance: result.distance,
-          similarity: 1 - result.distance,
-          songName: result.song_name,
+          ...baseResult,
           title: songName,
           artist: 'Unknown',
-          instrument: result.instrument,
-          startSec: result.start_sec,
-          endSec: result.end_sec,
         });
       }
     }
@@ -230,22 +238,40 @@ export class MusicService {
     return enrichedResults;
   }
 
-  // [보조] iTunes Search API (무료, 인증 불필요)
+  // [보조] iTunes Search API + 메모리 캐싱
   async fetchAlbumCoverFromItunes(title: string, artist: string): Promise<string> {
+    const cacheKey = `${title}|${artist}`.toLowerCase();
+    
+    // 캐시에서 먼저 확인
+    const cached = this.albumCoverCache.get(cacheKey);
+    if (cached && cached.expiry > Date.now()) {
+      return cached.url;
+    }
+
     try {
       const term = encodeURIComponent(`${title} ${artist}`);
       const url = `https://itunes.apple.com/search?term=${term}&media=music&limit=1`;
       
-      const response = await firstValueFrom(this.httpService.get(url));
+      const response = await firstValueFrom(
+        this.httpService.get(url, { timeout: 5000 }), // 타임아웃 추가
+      );
       
+      let albumCoverUrl = '';
       if (response.data.resultCount > 0) {
         // 100x100 저화질을 600x600 고화질로 변환
-        return response.data.results[0].artworkUrl100.replace('100x100', '600x600');
+        albumCoverUrl = response.data.results[0].artworkUrl100.replace('100x100', '600x600');
       }
-      return ''; // 검색 결과 없음
+
+      // 캐시에 저장 (결과가 없어도 캐싱하여 반복 호출 방지)
+      this.albumCoverCache.set(cacheKey, {
+        url: albumCoverUrl,
+        expiry: Date.now() + this.CACHE_TTL,
+      });
+
+      return albumCoverUrl;
     } catch (e) {
       console.error('iTunes API Error:', e.message);
-      return ''; // 검색 결과 없음
+      return '';
     }
   }
 
@@ -259,19 +285,38 @@ export class MusicService {
 
   // [보조] 음악 데이터 등록
   async registerMusic(data: Partial<Music>) {
+    if (!data.title) {
+      throw new BadRequestException('제목은 필수입니다.');
+    }
     return this.musicRepository.save(data);
   }
 
-  // [보조] 추천 히스토리 자동 저장
+  // [보조] 추천 히스토리 저장
+  // 파일은 저장하지 않고, 원본 파일명과 악기 정보만 기록
   async saveRecommendationHistory(params: {
     userId: number;
-    filePath: string;
+    originalFileName: string;
+    instrument: string;
     recommendedMusic: any[];
   }) {
+    // 파일명과 악기 정보를 조합하여 저장 (참고용 정보)
+    const audioInfo = `${params.originalFileName} (${params.instrument})`;
+
     return this.historyService.createHistory({
       userId: params.userId,
-      userUploadedAudio: params.filePath,
+      userUploadedAudio: audioInfo, // 파일명과 악기 정보만 저장
       recommendedMusic: params.recommendedMusic,
     });
+  }
+
+  // [보조] 파일 삭제 (존재하는 경우에만)
+  private deleteFileIfExists(filePath: string): void {
+    try {
+      if (existsSync(filePath)) {
+        unlinkSync(filePath);
+      }
+    } catch (error) {
+      console.warn(`파일 삭제 실패: ${filePath}`, error.message);
+    }
   }
 }
