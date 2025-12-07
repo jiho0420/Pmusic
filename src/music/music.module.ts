@@ -5,6 +5,7 @@ import { MusicController } from './music.controller';
 import { MusicService } from './music.service';
 import { Music } from './music.entity';
 import { HistoryModule } from '../history/history.module';
+import { AuthModule } from '../auth/auth.module';
 
 @Module({
   imports: [
@@ -14,6 +15,7 @@ import { HistoryModule } from '../history/history.module';
       maxRedirects: 5,
     }),
     forwardRef(() => HistoryModule),   // HistoryService 사용을 위한 순환 참조 해결
+    AuthModule,                        // JWT Guard 사용을 위해 import
   ],
   controllers: [MusicController],
   providers: [MusicService],

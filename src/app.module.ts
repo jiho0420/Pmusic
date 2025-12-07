@@ -7,6 +7,7 @@ import { HistoryModule } from './history/history.module';
 import { History } from './history/history.entity';
 import { UserModule } from './user/user.module';
 import { User } from './user/user.entity';
+import { AuthModule } from './auth/auth.module';
 
 @Module({
   imports: [
@@ -28,6 +29,7 @@ import { User } from './user/user.entity';
     MusicModule,
     HistoryModule,
     UserModule,
+    AuthModule,
   ],
 })
 export class AppModule {}

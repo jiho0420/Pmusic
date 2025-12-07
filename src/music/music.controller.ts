@@ -1,9 +1,22 @@
-import { Controller, Post, UploadedFile, UseInterceptors, Body, BadRequestException } from '@nestjs/common';
+import { Controller, Post, UploadedFile, UseInterceptors, Body, BadRequestException, UseGuards, Request } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import { extname } from 'path';
+import { existsSync, unlinkSync } from 'fs';
 import { MusicService } from './music.service';
+import { OptionalJwtAuthGuard } from '../auth/jwt-auth.guard';
 import * as os from 'os';
+
+// 파일 삭제 헬퍼 함수 (Controller 레벨에서 사용)
+const deleteFileIfExists = (filePath: string): void => {
+  try {
+    if (filePath && existsSync(filePath)) {
+      unlinkSync(filePath);
+    }
+  } catch (error) {
+    console.warn(`파일 삭제 실패: ${filePath}`, error);
+  }
+};
 
 // Multer 디스크 저장 설정 (임시 디렉토리에 저장, AI 처리 후 삭제)
 const tempDiskStorage = diskStorage({
@@ -23,46 +36,31 @@ const tempDiskStorage = diskStorage({
 export class MusicController {
   constructor(private readonly musicService: MusicService) {}
 
-  // 1. 음원 분리 API
-  // 분리된 음원 파일들을 개별적으로 접근 가능한 URL과 함께 반환
-  @Post('separate')
-  @UseInterceptors(FileInterceptor('file', { storage: tempDiskStorage }))
-  async separateMusic(@UploadedFile() file: Express.Multer.File) {
-    if (!file) {
-      throw new BadRequestException('파일이 없습니다.');
-    }
-
-    // AI 서버에서 ZIP 받아서 풀고, 개별 파일 정보 반환 (원본 파일은 처리 후 삭제됨)
-    const result = await this.musicService.separateMusic(file);
-    
-    return {
-      status: 'success',
-      files: result.files, // 각 파트별 파일 정보 (name, url, type)
-    };
-  }
-
-  // 2. 음악 추천 API (핵심 기능)
-  // 프론트에서 원본 노래, 시간 정보, 악기, 유저ID를 보내면
+  // 1. 음악 추천 API (핵심 기능)
+  // 프론트에서 원본 노래, 시간 정보, 악기를 보내면
   // 백엔드에서 노래를 자르고 AI 서버에서 추천받음
-  // 비로그인 유저는 userId를 null/빈값으로 보내면 됨
+  // 로그인 유저는 Authorization 헤더에 Bearer 토큰 포함
+  // 비로그인 유저는 토큰 없이 요청 가능 (OptionalJwtAuthGuard 사용)
   @Post('recommend')
+  @UseGuards(OptionalJwtAuthGuard)
   @UseInterceptors(FileInterceptor('audioFile', { storage: tempDiskStorage }))
   async recommendMusic(
     @UploadedFile() audioFile: Express.Multer.File,
     @Body() body: {
-      userId?: string; // 로그인 유저: 숫자 문자열, 비로그인: null/빈값/'null'
       instrument: string; // 'drums', 'vocals', 'bass', 'other' 등
       startSec: string; // form-data에서는 문자열로 전달됨
       endSec: string; // form-data에서는 문자열로 전달됨
     },
+    @Request() req: { user?: { id: number; email: string; nickname: string } },
   ) {
     // 파일 유효성 검사
     if (!audioFile) {
       throw new BadRequestException('파일이 없습니다.');
     }
 
-    // 필수 파라미터 검증 및 타입 변환
+    // 필수 파라미터 검증 및 타입 변환 (실패 시 업로드된 파일 삭제)
     if (!body.instrument) {
+      deleteFileIfExists(audioFile.path);
       throw new BadRequestException('악기 이름(instrument)이 필요합니다.');
     }
 
@@ -70,17 +68,17 @@ export class MusicController {
     const endSec = parseFloat(body.endSec);
 
     if (isNaN(startSec) || isNaN(endSec)) {
+      deleteFileIfExists(audioFile.path);
       throw new BadRequestException('시작 시간(startSec)과 종료 시간(endSec)이 필요합니다.');
     }
 
     if (startSec < 0 || endSec <= startSec) {
+      deleteFileIfExists(audioFile.path);
       throw new BadRequestException('유효한 시간 범위가 아닙니다. (startSec < endSec)');
     }
 
-    // userId 처리: null, 빈문자열, 'null' 문자열 모두 비로그인으로 처리
-    const isLoggedIn = body.userId && body.userId.trim() !== '' && body.userId.trim().toLowerCase() !== 'null';
-    const userId = isLoggedIn ? parseInt(body.userId!, 10) : null;
-    const validUserId = userId && !isNaN(userId) ? userId : null;
+    // JWT 토큰에서 userId 추출 (로그인 유저만 req.user 존재)
+    const validUserId = req.user?.id ?? null;
 
     // 1단계: 백엔드에서 오디오 파일 트리밍 (startSec ~ endSec 구간)
     const { trimmedFilePath, originalPath } = await this.musicService.trimAudio({
@@ -121,7 +119,7 @@ export class MusicController {
     };
   }
 
-  // 3. 음악 등록 API (관리자/테스트 데이터 추가용)
+  // 2. 음악 등록 API (관리자/테스트 데이터 추가용)
   // Postman으로 { "title": "Dynamite", "artist": "BTS", "youtubeVideoId": "...", ... } 등을 보냄
   @Post('register')
   async registerMusic(@Body() body: any) {
