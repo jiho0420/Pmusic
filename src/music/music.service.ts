@@ -4,10 +4,9 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { firstValueFrom } from 'rxjs';
 import FormData from 'form-data';
-import { createReadStream, readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from 'fs';
+import { readFileSync, existsSync, unlinkSync } from 'fs';
 import { join, extname } from 'path';
 import * as os from 'os';
-import AdmZip from 'adm-zip';
 import ffmpeg from 'fluent-ffmpeg';
 import { Music } from './music.entity';
 import { HistoryService } from '../history/history.service';
@@ -22,111 +21,14 @@ export class MusicService {
     private readonly historyService: HistoryService,
   ) {}
 
-  // 사설 클라우드 AI 서버 주소 (환경변수 또는 하드코딩)
-  // 기본값은 AI 서버 README에 따르면 포트 8080 사용
-  private readonly AI_SERVER_URL = process.env.AI_SERVER_URL || 'http://localhost:8080';
-  private readonly BASE_URL = process.env.BASE_URL || 'http://localhost:65041';
+  // 사설 클라우드 AI 서버 주소 (환경변수)
+  private readonly AI_SERVER_URL = process.env.AI_SERVER_URL;
 
   // iTunes API 캐싱 (메모리 캐시, TTL: 1시간)
   private readonly albumCoverCache = new Map<string, { url: string; expiry: number }>();
   private readonly CACHE_TTL = 60 * 60 * 1000; // 1시간
 
-  // --- [기능 1] 음원 분리 (AI 서버 연동) ---
-  // ZIP 파일을 받아서 풀고, 개별 파트 파일 정보 반환 (프론트엔드에서 직접 재생 가능하도록)
-  // 원본 파일은 처리 후 삭제하여 디스크 공간 절약
-  async separateMusic(file: Express.Multer.File): Promise<{
-    files: Array<{ name: string; url: string; type: string }>;
-  }> {
-    // 파일 유효성 검사
-    if (!file || !file.path) {
-      throw new BadRequestException('유효한 파일이 필요합니다.');
-    }
-
-    // 파일을 Buffer로 먼저 읽어서 메모리에 올림
-    // 이렇게 하면 파일 스트림 의존성이 사라져서 안전하게 파일 삭제 가능
-    const fileBuffer = readFileSync(file.path);
-    
-    // 파일을 메모리에 올렸으므로 즉시 삭제 가능
-    this.deleteFileIfExists(file.path);
-
-    const formData = new FormData();
-    formData.append('file', fileBuffer, {
-      filename: file.originalname,
-      contentType: file.mimetype || 'audio/mpeg',
-    });
-    formData.append('model', 'htdemucs'); 
-
-    try {
-      const response = await firstValueFrom(
-        this.httpService.post(`${this.AI_SERVER_URL}/separate`, formData, {
-          headers: formData.getHeaders(),
-          responseType: 'arraybuffer', // ZIP 파일 바이너리 수신
-          timeout: 600000, // 10분 (분리 작업은 오래 걸림)
-        }),
-      );
-
-      // ZIP 파일 압축 해제
-      const zip = new AdmZip(Buffer.from(response.data));
-      const uploadDir = process.env.UPLOAD_PATH || './uploads';
-      const separatedDir = join(uploadDir, 'separated');
-      
-      // 분리된 파일 저장 디렉토리 생성
-      if (!existsSync(separatedDir)) {
-        mkdirSync(separatedDir, { recursive: true });
-      }
-
-      // ZIP 파일 내의 각 파일 추출
-      const zipEntries = zip.getEntries();
-      const fileInfos: Array<{ name: string; url: string; type: string }> = [];
-
-      for (const entry of zipEntries) {
-        if (!entry.isDirectory) {
-          // 파일명에서 파트 타입 추출 (예: "song_drums.wav" -> "drums")
-          const fileName = entry.entryName;
-          const fileExt = extname(fileName);
-          const baseName = fileName.replace(fileExt, '');
-          
-          // 파트 타입 추출
-          const partType = this.extractPartType(baseName);
-
-          // 파일 저장
-          const entryBuffer = entry.getData();
-          const uniqueId = Date.now() + '-' + Math.round(Math.random() * 1e9);
-          const savedFileName = `${baseName}-${uniqueId}${fileExt}`;
-          const savedPath = join(separatedDir, savedFileName);
-          
-          writeFileSync(savedPath, entryBuffer);
-
-          // 접근 가능한 URL 생성
-          const fileUrl = `${this.BASE_URL}/music/separated/${savedFileName}`;
-          
-          fileInfos.push({
-            name: fileName,
-            url: fileUrl,
-            type: partType,
-          });
-        }
-      }
-
-      return { files: fileInfos };
-    } catch (error) {
-      console.error('AI Separation Failed:', error.message);
-      throw new HttpException('AI 서버 음원 분리 실패', HttpStatus.BAD_GATEWAY);
-    }
-  }
-
-  // [보조] 파일명에서 파트 타입 추출
-  private extractPartType(baseName: string): string {
-    const lowerName = baseName.toLowerCase();
-    if (lowerName.includes('drums') || lowerName.includes('drum')) return 'drums';
-    if (lowerName.includes('vocals') || lowerName.includes('vocal')) return 'vocals';
-    if (lowerName.includes('bass')) return 'bass';
-    if (lowerName.includes('piano')) return 'piano';
-    if (lowerName.includes('guitar')) return 'guitar';
-    return 'other';
-  }
-
-  // --- [기능 2] AI 서버로부터 유사한 음악 추천 받기 ---
+  // --- [기능 1] AI 서버로부터 유사한 음악 추천 받기 ---
   // AI 서버에 트리밍된 오디오 파일과 악기 이름을 전송하여 추천 받음
   // trimmedFilePath: 백엔드에서 트리밍한 파일 경로
   // originalFilePath: 원본 파일 경로 (삭제용)
@@ -182,7 +84,7 @@ export class MusicService {
     }
   }
 
-  // --- [기능 3] AI 서버 추천 결과를 DB Music 정보와 결합 ---
+  // --- [기능 2] AI 서버 추천 결과를 DB Music 정보와 결합 ---
   // AI 서버는 similarity를 직접 반환 (코사인 유사도, 0~1)
   async enrichRecommendationsWithMusicInfo(aiResults: any[]): Promise<any[]> {
     const enrichedResults: any[] = [];
@@ -336,7 +238,7 @@ export class MusicService {
     }
   }
 
-  // --- [기능 4] 오디오 파일 트리밍 (ffmpeg 사용) ---
+  // --- [기능 3] 오디오 파일 트리밍 (ffmpeg 사용) ---
   // 프론트에서 원본 파일을 보내면 백엔드에서 startSec ~ endSec 구간을 잘라냄
   // 실패 시에도 원본 파일을 반드시 삭제하여 디스크 공간 누수 방지
   async trimAudio(params: {
@@ -348,6 +250,10 @@ export class MusicService {
 
     // 파일 유효성 검사 (실패 시 원본 파일 삭제)
     if (!file || !file.path) {
+      // file이 있고 path가 있으면 삭제 시도 (방어적 프로그래밍)
+      if (file?.path) {
+        this.deleteFileIfExists(file.path);
+      }
       throw new BadRequestException('유효한 파일이 필요합니다.');
     }
 

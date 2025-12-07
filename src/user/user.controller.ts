@@ -1,12 +1,17 @@
 import { Body, Controller, Get, Param, Post } from '@nestjs/common';
 import { UserService } from './user.service';
+import { AuthService } from '../auth/auth.service';
 
 @Controller('users')
 export class UserController {
-  constructor(private readonly userService: UserService) {}
+  constructor(
+    private readonly userService: UserService,
+    private readonly authService: AuthService,
+  ) {}
 
-  @Post()
-  create(
+  // 회원가입 API: POST /api/users/register
+  @Post('register')
+  async register(
     @Body()
     body: {
       email: string;
@@ -14,7 +19,16 @@ export class UserController {
       nickname: string;
     },
   ) {
-    return this.userService.create(body);
+    await this.userService.create(body);
+    return { message: '회원가입이 완료되었습니다.' };
+  }
+
+  // 로그인 API: POST /api/users/login
+  @Post('login')
+  async login(
+    @Body() body: { email: string; password: string },
+  ) {
+    return this.authService.login(body.email, body.password);
   }
 
   @Get()

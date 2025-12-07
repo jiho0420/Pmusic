@@ -6,6 +6,9 @@ import { join } from 'path';
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
 
+  // Global prefix 설정 (프론트엔드 요청 URL: /api/...)
+  app.setGlobalPrefix('api');
+
   // CORS 설정 (프론트엔드와 연동을 위해)
   app.enableCors({
     origin: process.env.FRONTEND_URL || 'http://localhost:5173', // Vite 기본 포트
