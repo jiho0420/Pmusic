@@ -4,9 +4,11 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { firstValueFrom } from 'rxjs';
 import FormData from 'form-data';
-import { createReadStream, writeFileSync, mkdirSync, existsSync, unlinkSync } from 'fs';
+import { createReadStream, readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from 'fs';
 import { join, extname } from 'path';
+import * as os from 'os';
 import AdmZip from 'adm-zip';
+import ffmpeg from 'fluent-ffmpeg';
 import { Music } from './music.entity';
 import { HistoryService } from '../history/history.service';
 
@@ -40,8 +42,18 @@ export class MusicService {
       throw new BadRequestException('유효한 파일이 필요합니다.');
     }
 
+    // 파일을 Buffer로 먼저 읽어서 메모리에 올림
+    // 이렇게 하면 파일 스트림 의존성이 사라져서 안전하게 파일 삭제 가능
+    const fileBuffer = readFileSync(file.path);
+    
+    // 파일을 메모리에 올렸으므로 즉시 삭제 가능
+    this.deleteFileIfExists(file.path);
+
     const formData = new FormData();
-    formData.append('file', createReadStream(file.path), file.originalname);
+    formData.append('file', fileBuffer, {
+      filename: file.originalname,
+      contentType: file.mimetype || 'audio/mpeg',
+    });
     formData.append('model', 'htdemucs'); 
 
     try {
@@ -78,12 +90,12 @@ export class MusicService {
           const partType = this.extractPartType(baseName);
 
           // 파일 저장
-          const fileBuffer = entry.getData();
+          const entryBuffer = entry.getData();
           const uniqueId = Date.now() + '-' + Math.round(Math.random() * 1e9);
           const savedFileName = `${baseName}-${uniqueId}${fileExt}`;
           const savedPath = join(separatedDir, savedFileName);
           
-          writeFileSync(savedPath, fileBuffer);
+          writeFileSync(savedPath, entryBuffer);
 
           // 접근 가능한 URL 생성
           const fileUrl = `${this.BASE_URL}/music/separated/${savedFileName}`;
@@ -100,9 +112,6 @@ export class MusicService {
     } catch (error) {
       console.error('AI Separation Failed:', error.message);
       throw new HttpException('AI 서버 음원 분리 실패', HttpStatus.BAD_GATEWAY);
-    } finally {
-      // 원본 파일 삭제 (디스크 공간 절약)
-      this.deleteFileIfExists(file.path);
     }
   }
 
@@ -118,28 +127,38 @@ export class MusicService {
   }
 
   // --- [기능 2] AI 서버로부터 유사한 음악 추천 받기 ---
-  // AI 서버에 오디오 파일, 악기 이름, 시작/종료 시간을 전송하여 추천 받음
-  // 원본 파일은 처리 후 삭제하여 디스크 공간 절약
+  // AI 서버에 트리밍된 오디오 파일과 악기 이름을 전송하여 추천 받음
+  // trimmedFilePath: 백엔드에서 트리밍한 파일 경로
+  // originalFilePath: 원본 파일 경로 (삭제용)
   async getRecommendationsFromAI(params: {
-    file: Express.Multer.File;
+    trimmedFilePath: string;
+    originalFilePath: string;
+    originalFileName: string;
     instrument: string;
-    startSec: number;
-    endSec: number;
   }): Promise<any[]> {
     // 파일 유효성 검사
-    if (!params.file || !params.file.path) {
-      throw new BadRequestException('유효한 파일이 필요합니다.');
+    if (!params.trimmedFilePath || !existsSync(params.trimmedFilePath)) {
+      throw new BadRequestException('유효한 트리밍된 파일이 필요합니다.');
     }
 
+    // 파일을 Buffer로 먼저 읽어서 메모리에 올림
+    // 이렇게 하면 파일 스트림 의존성이 사라져서 안전하게 파일 삭제 가능
+    const fileBuffer = readFileSync(params.trimmedFilePath);
+    
+    // 파일을 메모리에 올렸으므로 즉시 삭제 가능
+    this.deleteFileIfExists(params.trimmedFilePath);
+    this.deleteFileIfExists(params.originalFilePath);
+
     const formData = new FormData();
-    formData.append('file', createReadStream(params.file.path), params.file.originalname);
+    formData.append('file', fileBuffer, {
+      filename: params.originalFileName,
+      contentType: 'audio/mpeg', // 기본 오디오 타입 (form-data에서 Buffer 사용 시 필요)
+    });
     formData.append('instrument', params.instrument);
-    formData.append('start_sec', params.startSec.toString());
-    formData.append('end_sec', params.endSec.toString());
 
     try {
       // AI 서버의 추천 API 호출
-      // 입력: 오디오 파일, 악기 이름, 시작 시간, 종료 시간
+      // 입력: 트리밍된 오디오 파일, 악기 이름
       // 출력: 유사한 음악 리스트 top_k = 5
       const response = await firstValueFrom(
         this.httpService.post(`${this.AI_SERVER_URL}/recommend`, formData, {
@@ -160,9 +179,6 @@ export class MusicService {
         `AI 서버 추천 실패: ${error.message}`,
         HttpStatus.BAD_GATEWAY,
       );
-    } finally {
-      // 원본 파일 삭제 (디스크 공간 절약)
-      this.deleteFileIfExists(params.file.path);
     }
   }
 
@@ -318,5 +334,64 @@ export class MusicService {
     } catch (error) {
       console.warn(`파일 삭제 실패: ${filePath}`, error.message);
     }
+  }
+
+  // --- [기능 4] 오디오 파일 트리밍 (ffmpeg 사용) ---
+  // 프론트에서 원본 파일을 보내면 백엔드에서 startSec ~ endSec 구간을 잘라냄
+  // 실패 시에도 원본 파일을 반드시 삭제하여 디스크 공간 누수 방지
+  async trimAudio(params: {
+    file: Express.Multer.File;
+    startSec: number;
+    endSec: number;
+  }): Promise<{ trimmedFilePath: string; originalPath: string }> {
+    const { file, startSec, endSec } = params;
+
+    // 파일 유효성 검사 (실패 시 원본 파일 삭제)
+    if (!file || !file.path) {
+      throw new BadRequestException('유효한 파일이 필요합니다.');
+    }
+
+    const duration = endSec - startSec;
+    if (duration <= 0) {
+      // validation 실패 시 원본 파일 삭제
+      this.deleteFileIfExists(file.path);
+      throw new BadRequestException('종료 시간은 시작 시간보다 커야 합니다.');
+    }
+
+    // 최대 트리밍 길이 제한 (예: 60초)
+    const MAX_TRIM_DURATION = 60;
+    if (duration > MAX_TRIM_DURATION) {
+      // validation 실패 시 원본 파일 삭제
+      this.deleteFileIfExists(file.path);
+      throw new BadRequestException(`트리밍 구간은 최대 ${MAX_TRIM_DURATION}초까지 가능합니다.`);
+    }
+
+    // 트리밍된 파일 저장 경로 (임시 디렉토리)
+    const tempDir = os.tmpdir();
+    const ext = extname(file.originalname);
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+    const trimmedFileName = `trimmed-${uniqueSuffix}${ext}`;
+    const trimmedFilePath = join(tempDir, trimmedFileName);
+
+    return new Promise((resolve, reject) => {
+      ffmpeg(file.path)
+        .setStartTime(startSec)
+        .setDuration(duration)
+        .output(trimmedFilePath)
+        .on('end', () => {
+          console.log(`트리밍 완료: ${startSec}s ~ ${endSec}s -> ${trimmedFilePath}`);
+          resolve({
+            trimmedFilePath,
+            originalPath: file.path,
+          });
+        })
+        .on('error', (err) => {
+          console.error('트리밍 실패:', err.message);
+          // ffmpeg 실패 시 원본 파일 삭제하여 디스크 공간 누수 방지
+          this.deleteFileIfExists(file.path);
+          reject(new HttpException('오디오 트리밍 실패', HttpStatus.INTERNAL_SERVER_ERROR));
+        })
+        .run();
+    });
   }
 }

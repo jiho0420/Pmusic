@@ -42,13 +42,15 @@ export class MusicController {
   }
 
   // 2. 음악 추천 API (핵심 기능)
-  // 사용자가 선택한 파트(드럼, 보컬 등)와 유사한 노래를 AI 서버에서 추천받음
+  // 프론트에서 원본 노래, 시간 정보, 악기, 유저ID를 보내면
+  // 백엔드에서 노래를 자르고 AI 서버에서 추천받음
+  // 비로그인 유저는 userId를 null/빈값으로 보내면 됨
   @Post('recommend')
   @UseInterceptors(FileInterceptor('audioFile', { storage: tempDiskStorage }))
   async recommendMusic(
     @UploadedFile() audioFile: Express.Multer.File,
     @Body() body: {
-      userId?: string; // form-data에서는 문자열로 전달됨
+      userId?: string; // 로그인 유저: 숫자 문자열, 비로그인: null/빈값/'null'
       instrument: string; // 'drums', 'vocals', 'bass', 'other' 등
       startSec: string; // form-data에서는 문자열로 전달됨
       endSec: string; // form-data에서는 문자열로 전달됨
@@ -75,26 +77,37 @@ export class MusicController {
       throw new BadRequestException('유효한 시간 범위가 아닙니다. (startSec < endSec)');
     }
 
-    // 1단계: AI 서버로 오디오 파일, 악기, 시간 정보 전송하여 추천 받기
-    // (원본 파일은 처리 후 삭제됨)
-    const aiResults = await this.musicService.getRecommendationsFromAI({
+    // userId 처리: null, 빈문자열, 'null' 문자열 모두 비로그인으로 처리
+    const isLoggedIn = body.userId && body.userId.trim() !== '' && body.userId.trim().toLowerCase() !== 'null';
+    const userId = isLoggedIn ? parseInt(body.userId!, 10) : null;
+    const validUserId = userId && !isNaN(userId) ? userId : null;
+
+    // 1단계: 백엔드에서 오디오 파일 트리밍 (startSec ~ endSec 구간)
+    const { trimmedFilePath, originalPath } = await this.musicService.trimAudio({
       file: audioFile,
-      instrument: body.instrument,
       startSec,
       endSec,
     });
 
-    // 2단계: AI 서버 결과를 DB Music 정보와 결합하여 풍부한 정보 제공
+    // 2단계: 트리밍된 파일을 AI 서버로 전송하여 추천 받기
+    // (트리밍된 파일과 원본 파일은 처리 후 삭제됨)
+    const aiResults = await this.musicService.getRecommendationsFromAI({
+      trimmedFilePath,
+      originalFilePath: originalPath,
+      originalFileName: audioFile.originalname,
+      instrument: body.instrument,
+    });
+
+    // 3단계: AI 서버 결과를 DB Music 정보와 결합하여 풍부한 정보 제공
     const enrichedResults = await this.musicService.enrichRecommendationsWithMusicInfo(
       aiResults,
     );
 
-    // 3단계: 히스토리 자동 저장 (userId가 제공된 경우)
-    const userId = body.userId ? parseInt(body.userId, 10) : null;
-    if (userId && !isNaN(userId)) {
+    // 4단계: 히스토리 자동 저장 (로그인 유저만)
+    if (validUserId) {
       await this.musicService.saveRecommendationHistory({
-        userId,
-        originalFileName: audioFile.originalname, // 원본 파일명만 저장
+        userId: validUserId,
+        originalFileName: audioFile.originalname,
         instrument: body.instrument,
         recommendedMusic: enrichedResults,
       });
@@ -102,6 +115,8 @@ export class MusicController {
 
     return {
       status: 'success',
+      isLoggedIn: !!validUserId, // 프론트에서 로그인 상태 확인 가능
+      historySaved: !!validUserId, // 히스토리 저장 여부
       results: enrichedResults,
     };
   }
