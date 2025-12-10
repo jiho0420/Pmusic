@@ -8,16 +8,23 @@ import { HistoryService } from '../history/history.service';
 
 @Injectable()
 export class MusicService {
+  // 사설 클라우드 AI 서버 주소 (환경변수)
+  private readonly AI_SERVER_URL: string;
+
   constructor(
     private readonly httpService: HttpService,
     @InjectRepository(Music)
     private readonly musicRepository: Repository<Music>,
     @Inject(forwardRef(() => HistoryService))
     private readonly historyService: HistoryService,
-  ) {}
-
-  // 사설 클라우드 AI 서버 주소 (환경변수)
-  private readonly AI_SERVER_URL = process.env.AI_SERVER_URL;
+  ) {
+    // 환경변수 검증 - 서버 시작 시 명확한 에러 메시지
+    const aiServerUrl = process.env.AI_SERVER_URL;
+    if (!aiServerUrl) {
+      console.warn('⚠️ AI_SERVER_URL 환경변수가 설정되지 않았습니다. AI 추천 기능이 비활성화됩니다.');
+    }
+    this.AI_SERVER_URL = aiServerUrl || '';
+  }
 
   // iTunes API 캐싱 (메모리 캐시, TTL: 1시간)
   private readonly albumCoverCache = new Map<string, { url: string; expiry: number }>();
@@ -32,6 +39,14 @@ export class MusicService {
     startSec: number;
     endSec: number;
   }): Promise<any[]> {
+    // AI 서버 URL 검증
+    if (!this.AI_SERVER_URL) {
+      throw new HttpException(
+        'AI 서버가 구성되지 않았습니다. 관리자에게 문의하세요.',
+        HttpStatus.SERVICE_UNAVAILABLE,
+      );
+    }
+
     // 필수 파라미터 검증
     if (!params.youtubeUrl) {
       throw new BadRequestException('유튜브 URL이 필요합니다.');
@@ -58,8 +73,19 @@ export class MusicService {
       );
       
       // AI 서버 응답 형식: { "status": "success", "results": [...] }
-      if (response.data.status === 'success' && response.data.results) {
-        return response.data.results;
+      const { data } = response;
+      
+      if (!data || typeof data !== 'object') {
+        throw new Error('AI 서버 응답이 올바르지 않습니다.');
+      }
+      
+      if (data.status === 'success' && Array.isArray(data.results)) {
+        return data.results;
+      }
+      
+      // AI 서버가 에러를 반환한 경우
+      if (data.status === 'error' && data.message) {
+        throw new Error(`AI 서버 오류: ${data.message}`);
       }
       
       throw new Error('AI 서버 응답 형식이 올바르지 않습니다.');
@@ -74,7 +100,12 @@ export class MusicService {
 
   // --- [기능 2] AI 서버 추천 결과를 DB Music 정보와 결합 ---
   // AI 서버는 similarity를 직접 반환 (코사인 유사도, 0~1)
-  async enrichRecommendationsWithMusicInfo(aiResults: any[]): Promise<any[]> {
+  // 프론트엔드 응답 형식에 맞게 변환
+  // fallback: AI가 구간 정보를 반환하지 않을 경우 사용할 원본 요청 값
+  async enrichRecommendationsWithMusicInfo(
+    aiResults: any[],
+    fallback: { startSec: number; endSec: number },
+  ): Promise<any[]> {
     const enrichedResults: any[] = [];
 
     for (const result of aiResults) {
@@ -84,6 +115,9 @@ export class MusicService {
       const [title, artist] = songName.split(' - ').map((s: string) => s.trim());
 
       const similarity = result.similarity ?? (result.distance ? 1 - result.distance : 0);
+      // AI 응답에 구간 정보가 없으면 원본 요청 값(fallback) 사용
+      const startSec = result.start_sec ?? fallback.startSec;
+      const endSec = result.end_sec ?? fallback.endSec;
 
       let musicInfo: Music | null = null;
       if (title) {
@@ -103,11 +137,11 @@ export class MusicService {
       // 공통 기본 정보
       const baseResult = {
         id: result.id,
-        similarity, // AI 서버에서 직접 받은 유사도 사용
-        songName: result.song_name,
+        similarity,
         instrument: result.instrument,
-        startSec: result.start_sec,
-        endSec: result.end_sec,
+        startSec,
+        endSec,
+        durationSeconds: endSec - startSec, // 프론트 요구사항: 구간 길이
       };
 
       // DB에 없는 경우 iTunes API로 정보 가져오기 (캐싱 적용)
@@ -118,7 +152,7 @@ export class MusicService {
           ...baseResult,
           title,
           artist: artist || 'Unknown',
-          albumCoverUrl,
+          albumCoverUrl: albumCoverUrl || null, // 빈 문자열 대신 null
           youtubeVideoId: null,
         });
       } else if (musicInfo) {
@@ -127,16 +161,17 @@ export class MusicService {
           ...baseResult,
           title: musicInfo.title,
           artist: musicInfo.artist,
-          albumCoverUrl: musicInfo.albumCoverUrl || '',
-          youtubeVideoId: musicInfo.youtubeVideoId,
-          youtubeStartTime: musicInfo.youtubeStartTime,
+          albumCoverUrl: musicInfo.albumCoverUrl || null, // 빈 문자열 대신 null
+          youtubeVideoId: musicInfo.youtubeVideoId || null,
         });
       } else {
         // 정보를 찾을 수 없는 경우 기본 정보만 반환
         enrichedResults.push({
           ...baseResult,
-          title: songName,
+          title: songName || 'Unknown',
           artist: 'Unknown',
+          albumCoverUrl: null,
+          youtubeVideoId: null,
         });
       }
     }
@@ -163,9 +198,13 @@ export class MusicService {
       );
       
       let albumCoverUrl = '';
-      if (response.data.resultCount > 0) {
-        // 100x100 저화질을 600x600 고화질로 변환
-        albumCoverUrl = response.data.results[0].artworkUrl100.replace('100x100', '600x600');
+      if (response.data.resultCount > 0 && response.data.results[0]) {
+        // artworkUrl100이 존재하는 경우에만 처리
+        const artworkUrl = response.data.results[0].artworkUrl100;
+        if (artworkUrl) {
+          // 100x100 저화질을 600x600 고화질로 변환
+          albumCoverUrl = artworkUrl.replace('100x100', '600x600');
+        }
       }
 
       // 캐시에 저장 (결과가 없어도 캐싱하여 반복 호출 방지)

@@ -17,7 +17,8 @@ import { UserModule } from '../user/user.module';
       useFactory: (configService: ConfigService) => ({
         secret: configService.get<string>('JWT_SECRET', 'pmusic-secret-key'),
         signOptions: {
-          expiresIn: (configService.get<string>('JWT_EXPIRES_IN', '7d') as string) as any, // 토큰 유효기간 7일
+          // 타입 호환성을 위해 any 캐스팅 (JWT 라이브러리 StringValue 타입 문제)
+          expiresIn: configService.get('JWT_EXPIRES_IN', '7d') as any, // 토큰 유효기간 7일
         },
       }),
     }),

@@ -10,6 +10,15 @@ interface RecommendRequestDto {
   endSec: number;          // 종료 시간 (초)
 }
 
+// 유효한 악기 종류 목록
+const VALID_INSTRUMENTS = ['drums', 'vocals', 'bass', 'other', 'piano', 'guitar'] as const;
+
+// YouTube URL 검증 정규식 (다양한 유튜브 URL 형식 지원)
+// - watch?v=, embed/, shorts/, youtu.be/ 형식 지원
+// - 비디오 ID 이후 쿼리 파라미터(&t=30, &list=... 등) 허용
+// - $ 앵커로 URL 끝 검증 (악의적 문자 삽입 방지)
+const YOUTUBE_URL_REGEX = /^(https?:\/\/)?(www\.)?(youtube\.com\/(watch\?v=|embed\/|shorts\/)|youtu\.be\/)[\w-]+([?&][\w=&%-]*)?$/;
+
 @Controller('music')
 export class MusicController {
   constructor(private readonly musicService: MusicService) {}
@@ -31,8 +40,21 @@ export class MusicController {
       throw new BadRequestException('유튜브 링크(youtubeUrl)가 필요합니다.');
     }
 
+    // YouTube URL 형식 검증
+    if (!YOUTUBE_URL_REGEX.test(body.youtubeUrl)) {
+      throw new BadRequestException('유효한 유튜브 링크 형식이 아닙니다.');
+    }
+
     if (!body.instrument) {
       throw new BadRequestException('악기 이름(instrument)이 필요합니다.');
+    }
+
+    // 유효한 악기 종류인지 검증
+    const instrument = body.instrument.toLowerCase();
+    if (!VALID_INSTRUMENTS.includes(instrument as any)) {
+      throw new BadRequestException(
+        `유효하지 않은 악기입니다. 사용 가능: ${VALID_INSTRUMENTS.join(', ')}`,
+      );
     }
 
     // null/undefined 체크 (Number(null) = 0이므로 별도 검증 필요)
@@ -49,7 +71,13 @@ export class MusicController {
     }
 
     if (startSec < 0 || endSec <= startSec) {
-      throw new BadRequestException('유효한 시간 범위가 아닙니다. (startSec < endSec)');
+      throw new BadRequestException('유효한 시간 범위가 아닙니다. (startSec >= 0, startSec < endSec)');
+    }
+
+    // 최대 구간 길이 제한 (AI 서버 부하 방지, 최대 5분)
+    const MAX_DURATION_SEC = 300;
+    if (endSec - startSec > MAX_DURATION_SEC) {
+      throw new BadRequestException(`분석 구간은 최대 ${MAX_DURATION_SEC}초(5분)까지 가능합니다.`);
     }
 
     // JWT 토큰에서 userId 추출 (로그인 유저만 req.user 존재)
@@ -59,14 +87,16 @@ export class MusicController {
     // AI 서버가 유튜브 다운로드, 트리밍, 악기 분리, 유사도 계산 수행
     const aiResults = await this.musicService.getRecommendationsFromAI({
       youtubeUrl: body.youtubeUrl,
-      instrument: body.instrument,
+      instrument, // 정규화된 소문자 악기명 사용
       startSec,
       endSec,
     });
 
     // 2단계: AI 서버 결과를 DB Music 정보와 결합하여 풍부한 정보 제공
+    // 원본 요청의 startSec, endSec를 fallback으로 전달 (AI가 구간 정보를 안 주는 경우 대비)
     const enrichedResults = await this.musicService.enrichRecommendationsWithMusicInfo(
       aiResults,
+      { startSec, endSec },
     );
 
     // 3단계: 히스토리 자동 저장 (로그인 유저만)
@@ -74,7 +104,7 @@ export class MusicController {
       await this.musicService.saveRecommendationHistory({
         userId: validUserId,
         youtubeUrl: body.youtubeUrl,
-        instrument: body.instrument,
+        instrument, // 정규화된 소문자 악기명 사용
         startSec,
         endSec,
         recommendedMusic: enrichedResults,
