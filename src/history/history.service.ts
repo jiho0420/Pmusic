@@ -15,7 +15,10 @@ export class HistoryService {
 
   async createHistory(params: {
     userId: number;
-    userUploadedAudio: string;
+    youtubeUrl: string;
+    instrument: string;
+    startSec: number;
+    endSec: number;
     recommendedMusic: any[];
   }) {
     const user = await this.userRepository.findOne({
@@ -28,7 +31,10 @@ export class HistoryService {
     const history = this.historyRepository.create({
       userId: params.userId,
       user: user,
-      userUploadedAudio: params.userUploadedAudio,
+      youtubeUrl: params.youtubeUrl,
+      instrument: params.instrument,
+      startSec: params.startSec,
+      endSec: params.endSec,
       recommendedMusic: params.recommendedMusic,
     });
     return this.historyRepository.save(history);

@@ -1,29 +1,16 @@
-import { Body, Controller, Get, Param, Post } from '@nestjs/common';
+import { Controller, Get, UseGuards, Request } from '@nestjs/common';
 import { HistoryService } from './history.service';
+import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 
 @Controller('history')
 export class HistoryController {
   constructor(private readonly historyService: HistoryService) {}
 
-  @Post()
-  create(
-    @Body()
-    body: {
-      userId: number;
-      userUploadedAudio: string;
-      recommendedMusic: import('./history.entity').RecommendedMusicItem[];
-    },
-  ) {
-    return this.historyService.createHistory({
-      userId: Number(body.userId),
-      userUploadedAudio: body.userUploadedAudio,
-      recommendedMusic: body.recommendedMusic,
-    });
-  }
-
-  // 특정 유저의 히스토리 조회 (예시)
-  @Get('user/:userId')
-  findByUser(@Param('userId') userId: string) {
-    return this.historyService.findByUserId(Number(userId));
+  // 본인의 히스토리 조회 (로그인 필수)
+  // JWT 토큰에서 userId를 추출하여 본인 히스토리만 조회
+  @Get('me')
+  @UseGuards(JwtAuthGuard)
+  findMyHistory(@Request() req: { user: { id: number; email: string; nickname: string } }) {
+    return this.historyService.findByUserId(req.user.id);
   }
 }

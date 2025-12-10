@@ -27,10 +27,21 @@ export class History {
   @CreateDateColumn()
   date: Date;
 
-  // [유저가 첨부한 음원 정보] 원본 파일명 + 악기 정보 (예: "song.mp3 (drums)")
-  // 파일 자체는 저장하지 않음 (디스크 공간 절약)
+  // [유튜브 URL] 분석한 유튜브 링크
   @Column()
-  userUploadedAudio: string;
+  youtubeUrl: string;
+
+  // [악기] 분석한 악기 종류 (drums, vocals, bass, other 등)
+  @Column()
+  instrument: string;
+
+  // [시작 시간] 분석 구간 시작 (초)
+  @Column('float')
+  startSec: number;
+
+  // [종료 시간] 분석 구간 종료 (초)
+  @Column('float')
+  endSec: number;
 
   // [추천된 노래] 추천 결과 리스트를 JSON 형태로 통째로 저장
   // 예: [{ title: 'Dynamite', artist: 'BTS', similarity: 0.98 }, ...]

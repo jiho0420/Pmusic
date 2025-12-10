@@ -3,11 +3,6 @@ import { HttpService } from '@nestjs/axios';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { firstValueFrom } from 'rxjs';
-import FormData from 'form-data';
-import { readFileSync, existsSync, unlinkSync } from 'fs';
-import { join, extname } from 'path';
-import * as os from 'os';
-import ffmpeg from 'fluent-ffmpeg';
 import { Music } from './music.entity';
 import { HistoryService } from '../history/history.service';
 
@@ -29,44 +24,37 @@ export class MusicService {
   private readonly CACHE_TTL = 60 * 60 * 1000; // 1시간
 
   // --- [기능 1] AI 서버로부터 유사한 음악 추천 받기 ---
-  // AI 서버에 트리밍된 오디오 파일과 악기 이름을 전송하여 추천 받음
-  // trimmedFilePath: 백엔드에서 트리밍한 파일 경로
-  // originalFilePath: 원본 파일 경로 (삭제용)
+  // AI 서버에 유튜브 URL, 악기, 시간 정보를 JSON으로 전송
+  // AI 서버가 유튜브 다운로드, 트리밍, 악기 분리, 유사도 계산 수행
   async getRecommendationsFromAI(params: {
-    trimmedFilePath: string;
-    originalFilePath: string;
-    originalFileName: string;
+    youtubeUrl: string;
     instrument: string;
+    startSec: number;
+    endSec: number;
   }): Promise<any[]> {
-    // 파일 유효성 검사
-    if (!params.trimmedFilePath || !existsSync(params.trimmedFilePath)) {
-      throw new BadRequestException('유효한 트리밍된 파일이 필요합니다.');
+    // 필수 파라미터 검증
+    if (!params.youtubeUrl) {
+      throw new BadRequestException('유튜브 URL이 필요합니다.');
     }
 
-    // 파일을 Buffer로 먼저 읽어서 메모리에 올림
-    // 이렇게 하면 파일 스트림 의존성이 사라져서 안전하게 파일 삭제 가능
-    const fileBuffer = readFileSync(params.trimmedFilePath);
-    
-    // 파일을 메모리에 올렸으므로 즉시 삭제 가능
-    this.deleteFileIfExists(params.trimmedFilePath);
-    this.deleteFileIfExists(params.originalFilePath);
-
-    const formData = new FormData();
-    formData.append('file', fileBuffer, {
-      filename: params.originalFileName,
-      contentType: 'audio/mpeg', // 기본 오디오 타입 (form-data에서 Buffer 사용 시 필요)
-    });
-    formData.append('instrument', params.instrument);
-
     try {
-      // AI 서버의 추천 API 호출
-      // 입력: 트리밍된 오디오 파일, 악기 이름
+      // AI 서버의 추천 API 호출 (JSON POST)
+      // 입력: youtube_url, instrument, start_sec, end_sec
       // 출력: 유사한 음악 리스트 top_k = 5
       const response = await firstValueFrom(
-        this.httpService.post(`${this.AI_SERVER_URL}/recommend`, formData, {
-          headers: formData.getHeaders(),
-          timeout: 30000, // 30초 타임아웃
-        }),
+        this.httpService.post(
+          `${this.AI_SERVER_URL}/recommend`,
+          {
+            youtube_url: params.youtubeUrl,
+            instrument: params.instrument,
+            start_sec: params.startSec,
+            end_sec: params.endSec,
+          },
+          {
+            headers: { 'Content-Type': 'application/json' },
+            timeout: 120000, // 120초 타임아웃 (AI 처리 시간 고려)
+          },
+        ),
       );
       
       // AI 서버 응답 형식: { "status": "success", "results": [...] }
@@ -210,94 +198,22 @@ export class MusicService {
   }
 
   // [보조] 추천 히스토리 저장
-  // 파일은 저장하지 않고, 원본 파일명과 악기 정보만 기록
+  // 유튜브 URL과 분석 정보를 기록
   async saveRecommendationHistory(params: {
     userId: number;
-    originalFileName: string;
+    youtubeUrl: string;
     instrument: string;
-    recommendedMusic: any[];
-  }) {
-    // 파일명과 악기 정보를 조합하여 저장 (참고용 정보)
-    const audioInfo = `${params.originalFileName} (${params.instrument})`;
-
-    return this.historyService.createHistory({
-      userId: params.userId,
-      userUploadedAudio: audioInfo, // 파일명과 악기 정보만 저장
-      recommendedMusic: params.recommendedMusic,
-    });
-  }
-
-  // [보조] 파일 삭제 (존재하는 경우에만)
-  private deleteFileIfExists(filePath: string): void {
-    try {
-      if (existsSync(filePath)) {
-        unlinkSync(filePath);
-      }
-    } catch (error) {
-      console.warn(`파일 삭제 실패: ${filePath}`, error.message);
-    }
-  }
-
-  // --- [기능 3] 오디오 파일 트리밍 (ffmpeg 사용) ---
-  // 프론트에서 원본 파일을 보내면 백엔드에서 startSec ~ endSec 구간을 잘라냄
-  // 실패 시에도 원본 파일을 반드시 삭제하여 디스크 공간 누수 방지
-  async trimAudio(params: {
-    file: Express.Multer.File;
     startSec: number;
     endSec: number;
-  }): Promise<{ trimmedFilePath: string; originalPath: string }> {
-    const { file, startSec, endSec } = params;
-
-    // 파일 유효성 검사 (실패 시 원본 파일 삭제)
-    if (!file || !file.path) {
-      // file이 있고 path가 있으면 삭제 시도 (방어적 프로그래밍)
-      if (file?.path) {
-        this.deleteFileIfExists(file.path);
-      }
-      throw new BadRequestException('유효한 파일이 필요합니다.');
-    }
-
-    const duration = endSec - startSec;
-    if (duration <= 0) {
-      // validation 실패 시 원본 파일 삭제
-      this.deleteFileIfExists(file.path);
-      throw new BadRequestException('종료 시간은 시작 시간보다 커야 합니다.');
-    }
-
-    // 최대 트리밍 길이 제한 (예: 60초)
-    const MAX_TRIM_DURATION = 60;
-    if (duration > MAX_TRIM_DURATION) {
-      // validation 실패 시 원본 파일 삭제
-      this.deleteFileIfExists(file.path);
-      throw new BadRequestException(`트리밍 구간은 최대 ${MAX_TRIM_DURATION}초까지 가능합니다.`);
-    }
-
-    // 트리밍된 파일 저장 경로 (임시 디렉토리)
-    const tempDir = os.tmpdir();
-    const ext = extname(file.originalname);
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
-    const trimmedFileName = `trimmed-${uniqueSuffix}${ext}`;
-    const trimmedFilePath = join(tempDir, trimmedFileName);
-
-    return new Promise((resolve, reject) => {
-      ffmpeg(file.path)
-        .setStartTime(startSec)
-        .setDuration(duration)
-        .output(trimmedFilePath)
-        .on('end', () => {
-          console.log(`트리밍 완료: ${startSec}s ~ ${endSec}s -> ${trimmedFilePath}`);
-          resolve({
-            trimmedFilePath,
-            originalPath: file.path,
-          });
-        })
-        .on('error', (err) => {
-          console.error('트리밍 실패:', err.message);
-          // ffmpeg 실패 시 원본 파일 삭제하여 디스크 공간 누수 방지
-          this.deleteFileIfExists(file.path);
-          reject(new HttpException('오디오 트리밍 실패', HttpStatus.INTERNAL_SERVER_ERROR));
-        })
-        .run();
+    recommendedMusic: any[];
+  }) {
+    return this.historyService.createHistory({
+      userId: params.userId,
+      youtubeUrl: params.youtubeUrl,
+      instrument: params.instrument,
+      startSec: params.startSec,
+      endSec: params.endSec,
+      recommendedMusic: params.recommendedMusic,
     });
   }
 }
