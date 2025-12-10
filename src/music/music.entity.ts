@@ -1,6 +1,6 @@
 import { Entity, Column, PrimaryGeneratedColumn } from 'typeorm';
 
-@Entity()
+@Entity('Music')  // 기존 DB 테이블명과 일치
 export class Music {
   @PrimaryGeneratedColumn()
   id: number;

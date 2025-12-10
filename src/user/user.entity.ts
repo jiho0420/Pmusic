@@ -1,7 +1,7 @@
 import { Entity, Column, PrimaryGeneratedColumn, OneToMany, CreateDateColumn } from 'typeorm';
 import { History } from '../history/history.entity';
 
-@Entity()
+@Entity('Users')  // 기존 DB 테이블명과 일치
 export class User {
   // [Index] 유저 고유 번호 (1, 2, 3...)
   @PrimaryGeneratedColumn()
