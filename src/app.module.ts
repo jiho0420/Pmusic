@@ -24,6 +24,8 @@ import { AuthModule } from './auth/auth.module';
         database: config.get<string>('DB_DATABASE', 'db25xxx'),
         entities: [Music, User, History],
         synchronize: config.get<string>('DB_SYNC', 'true') === 'true',
+        charset: 'utf8mb4',
+        collation: 'utf8mb4_unicode_ci',
       }),
     }),
     MusicModule,

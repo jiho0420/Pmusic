@@ -19,9 +19,9 @@ export class AuthController {
   @Get('me')
   getMe(@Request() req: { user: { id: number; email: string; nickname: string } }) {
     return {
-      id: req.user.id,
-      email: req.user.email,
+      userId: req.user.id,
       nickname: req.user.nickname,
+      email: req.user.email,
     };
   }
 }

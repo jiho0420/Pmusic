@@ -16,7 +16,7 @@ export class HistoryService {
   async createHistory(params: {
     userId: number;
     youtubeUrl: string;
-    instrument: string;
+    instrument: string[];   // 배열로 여러 악기 지원
     startSec: number;
     endSec: number;
     recommendedMusic: any[];
@@ -32,7 +32,7 @@ export class HistoryService {
       userId: params.userId,
       user: user,
       youtubeUrl: params.youtubeUrl,
-      instrument: params.instrument,
+      instrument: params.instrument,    // 배열로 저장
       startSec: params.startSec,
       endSec: params.endSec,
       recommendedMusic: params.recommendedMusic,

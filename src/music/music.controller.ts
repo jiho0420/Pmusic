@@ -5,9 +5,10 @@ import { OptionalJwtAuthGuard } from '../auth/jwt-auth.guard';
 // 추천 요청 DTO (JSON Body)
 interface RecommendRequestDto {
   youtubeUrl: string;      // 유튜브 링크
-  instrument: string;      // 'drums', 'vocals', 'bass', 'other' 등
+  instrument: string[];    // 'drums', 'vocals', 'bass', 'other' 등 (배열로 여러 개 가능)
   startSec: number;        // 시작 시간 (초)
   endSec: number;          // 종료 시간 (초)
+  topK?: number;           // 추천 곡 개수 (선택, 기본값 5)
 }
 
 // 유효한 악기 종류 목록
@@ -45,16 +46,24 @@ export class MusicController {
       throw new BadRequestException('유효한 유튜브 링크 형식이 아닙니다.');
     }
 
-    if (!body.instrument) {
-      throw new BadRequestException('악기 이름(instrument)이 필요합니다.');
+    if (!body.instrument || !Array.isArray(body.instrument) || body.instrument.length === 0) {
+      throw new BadRequestException('악기 이름 배열(instrument)이 필요합니다. 최소 1개 이상의 악기를 선택하세요.');
     }
 
-    // 유효한 악기 종류인지 검증
-    const instrument = body.instrument.toLowerCase();
-    if (!VALID_INSTRUMENTS.includes(instrument as any)) {
-      throw new BadRequestException(
-        `유효하지 않은 악기입니다. 사용 가능: ${VALID_INSTRUMENTS.join(', ')}`,
-      );
+    // 유효한 악기 종류인지 검증 (모든 악기에 대해)
+    const instrument = body.instrument.map((inst: string) => inst.toLowerCase());
+    for (const inst of instrument) {
+      if (!VALID_INSTRUMENTS.includes(inst as any)) {
+        throw new BadRequestException(
+          `유효하지 않은 악기입니다: ${inst}. 사용 가능: ${VALID_INSTRUMENTS.join(', ')}`,
+        );
+      }
+    }
+
+    // topK 검증 (선택적, 기본값 5, 정수만 허용)
+    const topK = body.topK != null ? Number(body.topK) : 5;
+    if (isNaN(topK) || !Number.isInteger(topK) || topK < 1 || topK > 50) {
+      throw new BadRequestException('추천 곡 개수(topK)는 1 이상 50 이하의 정수여야 합니다.');
     }
 
     // null/undefined 체크 (Number(null) = 0이므로 별도 검증 필요)
@@ -87,16 +96,17 @@ export class MusicController {
     // AI 서버가 유튜브 다운로드, 트리밍, 악기 분리, 유사도 계산 수행
     const aiResults = await this.musicService.getRecommendationsFromAI({
       youtubeUrl: body.youtubeUrl,
-      instrument, // 정규화된 소문자 악기명 사용
+      instrument, // 정규화된 소문자 악기명 배열 사용
       startSec,
       endSec,
+      topK,
     });
 
     // 2단계: AI 서버 결과를 DB Music 정보와 결합하여 풍부한 정보 제공
-    // 원본 요청의 startSec, endSec를 fallback으로 전달 (AI가 구간 정보를 안 주는 경우 대비)
+    // 원본 요청의 startSec, endSec, instrument를 fallback으로 전달 (AI가 정보를 안 주는 경우 대비)
     const enrichedResults = await this.musicService.enrichRecommendationsWithMusicInfo(
       aiResults,
-      { startSec, endSec },
+      { startSec, endSec, instrument },
     );
 
     // 3단계: 히스토리 자동 저장 (로그인 유저만)
@@ -104,7 +114,7 @@ export class MusicController {
       await this.musicService.saveRecommendationHistory({
         userId: validUserId,
         youtubeUrl: body.youtubeUrl,
-        instrument, // 정규화된 소문자 악기명 사용
+        instrument, // 정규화된 소문자 악기명 배열 사용
         startSec,
         endSec,
         recommendedMusic: enrichedResults,

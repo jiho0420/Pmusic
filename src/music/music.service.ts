@@ -31,13 +31,14 @@ export class MusicService {
   private readonly CACHE_TTL = 60 * 60 * 1000; // 1시간
 
   // --- [기능 1] AI 서버로부터 유사한 음악 추천 받기 ---
-  // AI 서버에 유튜브 URL, 악기, 시간 정보를 JSON으로 전송
+  // AI 서버에 유튜브 URL, 악기 배열, 시간 정보, 추천 곡 개수를 JSON으로 전송
   // AI 서버가 유튜브 다운로드, 트리밍, 악기 분리, 유사도 계산 수행
   async getRecommendationsFromAI(params: {
     youtubeUrl: string;
-    instrument: string;
+    instrument: string[];   // 배열로 여러 악기 지원
     startSec: number;
     endSec: number;
+    topK: number;           // 추천 곡 개수
   }): Promise<any[]> {
     // AI 서버 URL 검증
     if (!this.AI_SERVER_URL) {
@@ -54,16 +55,17 @@ export class MusicService {
 
     try {
       // AI 서버의 추천 API 호출 (JSON POST)
-      // 입력: youtube_url, instrument, start_sec, end_sec
-      // 출력: 유사한 음악 리스트 top_k = 5
+      // 입력: youtube_url, instrument (배열), start_sec, end_sec, top_k
+      // 출력: 유사한 음악 리스트 (top_k 개수만큼)
       const response = await firstValueFrom(
         this.httpService.post(
           `${this.AI_SERVER_URL}/recommend`,
           {
             youtube_url: params.youtubeUrl,
-            instrument: params.instrument,
+            instrument: params.instrument,    // 배열로 여러 악기 전송
             start_sec: params.startSec,
             end_sec: params.endSec,
+            top_k: params.topK,               // 추천 곡 개수
           },
           {
             headers: { 'Content-Type': 'application/json' },
@@ -100,11 +102,10 @@ export class MusicService {
 
   // --- [기능 2] AI 서버 추천 결과를 DB Music 정보와 결합 ---
   // AI 서버는 similarity를 직접 반환 (코사인 유사도, 0~1)
-  // 프론트엔드 응답 형식에 맞게 변환
-  // fallback: AI가 구간 정보를 반환하지 않을 경우 사용할 원본 요청 값
+  // fallback: AI가 구간 정보나 악기 정보를 반환하지 않을 경우 사용할 원본 요청 값
   async enrichRecommendationsWithMusicInfo(
     aiResults: any[],
-    fallback: { startSec: number; endSec: number },
+    fallback: { startSec: number; endSec: number; instrument: string[] },
   ): Promise<any[]> {
     const enrichedResults: any[] = [];
 
@@ -138,7 +139,7 @@ export class MusicService {
       const baseResult = {
         id: result.id,
         similarity,
-        instrument: result.instrument,
+        instrument: result.instrument ?? fallback.instrument,  // AI 응답에 없으면 fallback 사용
         startSec,
         endSec,
         durationSeconds: endSec - startSec, // 프론트 요구사항: 구간 길이
@@ -241,7 +242,7 @@ export class MusicService {
   async saveRecommendationHistory(params: {
     userId: number;
     youtubeUrl: string;
-    instrument: string;
+    instrument: string[];   // 배열로 여러 악기 지원
     startSec: number;
     endSec: number;
     recommendedMusic: any[];
@@ -249,7 +250,7 @@ export class MusicService {
     return this.historyService.createHistory({
       userId: params.userId,
       youtubeUrl: params.youtubeUrl,
-      instrument: params.instrument,
+      instrument: params.instrument,    // 배열로 전달
       startSec: params.startSec,
       endSec: params.endSec,
       recommendedMusic: params.recommendedMusic,

@@ -31,9 +31,9 @@ export class History {
   @Column()
   youtubeUrl: string;
 
-  // [악기] 분석한 악기 종류 (drums, vocals, bass, other 등)
-  @Column()
-  instrument: string;
+  // [악기] 분석한 악기 종류 배열 (drums, vocals, bass, other 등 여러 개 가능)
+  @Column('simple-json')
+  instrument: string[];
 
   // [시작 시간] 분석 구간 시작 (초)
   @Column('float')
