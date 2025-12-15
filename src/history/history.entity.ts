@@ -5,8 +5,7 @@ export interface RecommendedMusicItem {
   title: string;
   artist: string;
   similarity: number;
-  youtubeVideoId?: string;
-  albumCoverUrl?: string;
+  link: string;
 }
 
 @Entity('History')  // 기존 DB 테이블명과 일치

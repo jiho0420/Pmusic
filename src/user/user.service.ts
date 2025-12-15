@@ -45,4 +45,9 @@ export class UserService {
   findOneWithPassword(id: number): Promise<User | null> {
     return this.userRepository.findOne({ where: { id } });
   }
+
+  // 유저 삭제 (계정 탈퇴)
+  async deleteUser(id: number): Promise<void> {
+    await this.userRepository.delete(id);
+  }
 }

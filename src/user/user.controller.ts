@@ -1,6 +1,7 @@
-import { Body, Controller, Post, ConflictException, BadRequestException } from '@nestjs/common';
+import { Body, Controller, Post, Delete, HttpCode, UseGuards, Request, ConflictException, BadRequestException } from '@nestjs/common';
 import { UserService } from './user.service';
 import { AuthService } from '../auth/auth.service';
+import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 
 @Controller('users')
 export class UserController {
@@ -59,8 +60,23 @@ export class UserController {
     return this.authService.login(body.email, body.password);
   }
 
-  // ⚠️ 보안상 위험: 전체 유저 조회 및 개별 유저 조회 API 제거
-  // 필요시 관리자 전용 Guard를 추가하여 보호된 API로 구현할 것
+  // 로그아웃 API: POST /api/users/logout
+  // JWT는 stateless이므로 서버 측 토큰 무효화 없이 성공 응답 반환
+  // 실제 토큰 삭제는 프론트엔드에서 처리
+  @Post('logout')
+  @UseGuards(JwtAuthGuard)
+  async logout() {
+    return { message: '로그아웃 되었습니다.' };
+  }
+
+  // 계정 삭제 API: DELETE /api/users/delete
+  // 본인 계정만 삭제 가능 (JWT 토큰에서 userId 추출)
+  @Delete('delete')
+  @HttpCode(204)
+  @UseGuards(JwtAuthGuard)
+  async deleteAccount(@Request() req: { user: { id: number } }) {
+    await this.userService.deleteUser(req.user.id);
+  }
 }
 
 
