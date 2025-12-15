@@ -110,10 +110,9 @@ export class MusicService {
     const enrichedResults: any[] = [];
 
     for (const result of aiResults) {
-      // AI 서버가 반환한 song_name으로 DB에서 음악 정보 조회
-      // song_name 형식이 "제목 - 아티스트" 또는 "제목"일 수 있음
-      const songName = result.song_name || '';
-      const [title, artist] = songName.split(' - ').map((s: string) => s.trim());
+      // title, artist를 별도 필드로 반환
+      const title = result.title?.trim() || '';
+      const artist = result.artist?.trim() || '';
 
       const similarity = result.similarity ?? (result.distance ? 1 - result.distance : 0);
       // AI 응답에 구간 정보가 없으면 원본 요청 값(fallback) 사용
@@ -169,8 +168,8 @@ export class MusicService {
         // 정보를 찾을 수 없는 경우 기본 정보만 반환
         enrichedResults.push({
           ...baseResult,
-          title: songName || 'Unknown',
-          artist: 'Unknown',
+          title: title || 'Unknown',
+          artist: artist || 'Unknown',
           albumCoverUrl: null,
           youtubeVideoId: null,
         });
